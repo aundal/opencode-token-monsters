@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.4.7",
+    "@opentui/core": "^0.4.0",
+    "@opentui/solid": "^0.4.0",
+    "gpt-tokenizer": "^3.4.0",
+    "solid-js": "^1.9.13"
+  }
+}
