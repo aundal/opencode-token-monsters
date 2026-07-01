@@ -174,6 +174,25 @@ function buildFallback(api, sessionID) {
   return { current: entries.length ? [entries[entries.length - 1]] : [], total: entries, overheadCurrent: {}, overheadTotal: {} }
 }
 
+function entryTotal(e) {
+  return (e?.in || 0) + (e?.out || 0) + sumVals(e?.t) + (e?.f || 0) + (e?.s || 0)
+}
+
+function mergeLiveEntries(captured, live) {
+  const cap = Array.isArray(captured) ? [...captured] : []
+  const liveArr = Array.isArray(live) ? live : []
+  for (const liveEntry of liveArr) {
+    let idx = cap.findIndex((e) => e?.o === liveEntry?.o && e?.r === liveEntry?.r)
+    if (idx < 0) idx = cap.findIndex((e) => e?.r === liveEntry?.r && Math.abs((e?.o || 0) - (liveEntry?.o || 0)) < 1000)
+    if (idx >= 0) {
+      if (entryTotal(liveEntry) >= entryTotal(cap[idx])) cap[idx] = liveEntry
+    } else {
+      cap.push(liveEntry)
+    }
+  }
+  return cap.sort((a, b) => (a?.o || 0) - (b?.o || 0))
+}
+
 // ---------------------------------------------------------------------------
 // Node tree builders.  A node = { label, tokens, frac?, children? }.
 // ---------------------------------------------------------------------------
@@ -412,6 +431,7 @@ function View(props) {
   onMount(() => {
     refreshCapture()
     unsubscribe = api.event.on("message.updated", () => {
+      setCapture((v) => v ? { ...v } : v)
       if (debounce) clearTimeout(debounce)
       debounce = setTimeout(refreshCapture, EVENT_DEBOUNCE_MS)
     })
@@ -445,10 +465,13 @@ function View(props) {
   })
 
   const model = createMemo(() => {
-    const cap = capture() || buildFallback(api, props.session_id)
+    const live = buildFallback(api, props.session_id)
+    const cap = capture() || live
     const sc = scope()
     if (!cap || (!Array.isArray(cap.current) && !Array.isArray(cap.total))) return { ready: false, list: [] }
-    const entries = sc === "total" ? cap.total || [] : cap.current || []
+    const entries = sc === "total"
+      ? mergeLiveEntries(cap.total || [], live.total || [])
+      : mergeLiveEntries(cap.current || [], live.current || [])
     const ov = sc === "total" ? cap.overheadTotal || {} : cap.overheadCurrent || {}
     return { ready: true, list: buildList(entries, ov, sc === "total" ? "total" : "current", view()) }
   })
