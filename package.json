@@ -1,12 +1,29 @@
 {
   "name": "@aundal/opencode-token-monsters",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode plugin that shows Token Monsters token usage breakdowns in the TUI sidebar.",
   "author": "aundal",
   "license": "MIT",
   "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/server.js",
+  "types": "dist/server.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js",
+      "default": "./dist/tui.js"
+    }
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/aundal/opencode-token-monsters.git"
@@ -21,7 +38,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "bun build src/index.tsx --outdir dist --target bun --external @opencode-ai/plugin --external @opentui/solid --external solid-js --external gpt-tokenizer && tsc --emitDeclarationOnly",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && bun build src/server.ts src/tui.tsx --outdir dist --target bun --external @opencode-ai/plugin --external @opentui/solid --external solid-js --external gpt-tokenizer && tsc --emitDeclarationOnly",
     "prepack": "bun run build",
     "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit"
@@ -34,19 +51,17 @@
     "tui"
   ],
   "dependencies": {
-    "gpt-tokenizer": "^3.4.0"
+    "@opentui/solid": "^0.4.0",
+    "gpt-tokenizer": "^3.4.0",
+    "solid-js": "^1.9.13"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.4.7",
-    "@opentui/solid": "^0.4.0",
     "bun-types": "^1.2.19",
     "@types/node": "^24.0.7",
-    "solid-js": "^1.9.13",
     "typescript": "^5.8.3"
   },
   "peerDependencies": {
-    "@opencode-ai/plugin": ">=1.4.0",
-    "@opentui/solid": ">=0.4.0",
-    "solid-js": ">=1.9.0"
+    "@opencode-ai/plugin": ">=1.4.0"
   }
 }

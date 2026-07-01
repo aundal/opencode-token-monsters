@@ -531,14 +531,8 @@ function registerCommand(api, toggle) {
   } catch {}
 }
 
-export { TokenUsageCapture } from "./capture"
-
 export const TokenMonsters = {
   id: PLUGIN_ID,
-  server: async (input, options) => {
-    const { TokenUsageCapture } = await import("./capture")
-    return TokenUsageCapture(input, options)
-  },
   async tui(api, options) {
     if (options?.enabled === false) return
     try { setEnabled(api.kv?.get?.("tm_enabled", true) !== false) } catch {}
