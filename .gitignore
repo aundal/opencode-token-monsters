@@ -3,3 +3,6 @@ dist/
 *.tgz
 .token-usage-cache.json
 .DS_Store
+*.log
+example/
+plugins/
