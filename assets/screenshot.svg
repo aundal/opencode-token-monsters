@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="361" height="643" viewBox="0 0 361 643">
+  <rect width="361" height="643" fill="#1b1d18"/>
+  <g font-family="Consolas, Menlo, monospace" font-size="16" font-weight="700">
+    <text x="7" y="17" fill="#f0efe5">▼ Token Monsters:</text>
+    <text x="7" y="35" fill="#777462">Session: &lt; </text><text x="105" y="35" fill="#66d9ef">Aktuel</text><text x="163" y="35" fill="#777462"> &gt;</text>
+    <text x="7" y="53" fill="#777462">View:    &lt; </text><text x="105" y="53" fill="#66d9ef">Prompts</text><text x="171" y="53" fill="#777462"> &gt;</text>
+    <text x="7" y="92" fill="#777462">Context now</text><text x="242" y="92" fill="#f0efe5">69,894 · 7%</text>
+    <text x="7" y="111" fill="#777462">Cache hit</text><text x="304" y="111" fill="#f0efe5">100%</text>
+    <text x="7" y="150" fill="#777462">This prompt ~approx</text>
+    <text x="7" y="168" fill="#f0efe5">▼ Overhead</text><text x="278" y="168" fill="#777462">20.4k</text>
+    <text x="25" y="187" fill="#777462">opencode</text><text x="278" y="187" fill="#777462">2.0k</text>
+    <text x="25" y="205" fill="#777462">AGENTS.md</text><text x="278" y="205" fill="#777462">296</text>
+    <text x="16" y="224" fill="#777462">▼ tool defs</text><text x="278" y="224" fill="#777462">13.4k</text>
+    <text x="25" y="243" fill="#777462">bash</text><text x="278" y="243" fill="#777462">2.5k</text>
+    <text x="25" y="262" fill="#777462">question</text><text x="278" y="262" fill="#777462">2.2k</text>
+    <text x="25" y="281" fill="#777462">webfetch</text><text x="278" y="281" fill="#777462">2.0k</text>
+    <text x="25" y="300" fill="#777462">read</text><text x="278" y="300" fill="#777462">1.7k</text>
+    <text x="25" y="319" fill="#777462">task</text><text x="278" y="319" fill="#777462">1.7k</text>
+    <text x="25" y="338" fill="#777462">todowrite</text><text x="278" y="338" fill="#777462">1.3k</text>
+    <text x="25" y="357" fill="#777462">grep</text><text x="278" y="357" fill="#777462">829</text>
+    <text x="25" y="376" fill="#777462">glob</text><text x="278" y="376" fill="#777462">575</text>
+    <text x="25" y="395" fill="#777462">other</text><text x="278" y="395" fill="#777462">665</text>
+    <text x="16" y="414" fill="#777462">skill defs</text><text x="278" y="414" fill="#777462">676</text>
+    <text x="16" y="433" fill="#777462">Skills</text><text x="278" y="433" fill="#777462">4.1k</text>
+    <text x="7" y="452" fill="#f0efe5">▼ Prompts</text><text x="278" y="452" fill="#777462">55.8k</text>
+    <text x="16" y="471" fill="#777462">▼ Msg 1</text><text x="278" y="471" fill="#777462">4.0k</text>
+    <text x="25" y="490" fill="#777462">Input</text><text x="278" y="490" fill="#777462">9</text>
+    <text x="25" y="509" fill="#777462">Output</text><text x="278" y="509" fill="#777462">151</text>
+    <text x="25" y="528" fill="#777462">▼ Tool calls</text><text x="278" y="528" fill="#777462">3.8k</text>
+    <text x="43" y="547" fill="#777462">▶ read (3)</text><text x="278" y="547" fill="#777462">2.5k</text>
+    <text x="43" y="566" fill="#777462">▶ glob (4)</text><text x="278" y="566" fill="#777462">832</text>
+    <text x="43" y="585" fill="#777462">▶ grep (2)</text><text x="278" y="585" fill="#777462">439</text>
+    <text x="16" y="604" fill="#777462">▶ Msg 2</text><text x="278" y="604" fill="#777462">50.6k</text>
+    <text x="16" y="623" fill="#777462">▶ Msg 3</text><text x="278" y="623" fill="#777462">1.3k</text>
+  </g>
+  <g opacity="0.75">
+    <rect x="178" y="153" width="27" height="18" fill="#66d9ef"/>
+    <rect x="178" y="209" width="72" height="190" fill="#3c3d32"/>
+    <rect x="178" y="438" width="72" height="19" fill="#66d9ef"/>
+    <rect x="178" y="456" width="72" height="57" fill="#3c3d32"/>
+    <rect x="178" y="552" width="72" height="38" fill="#3c3d32"/>
+  </g>
+</svg>

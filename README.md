@@ -4,6 +4,8 @@ Token Monsters adds a token usage sidebar to OpenCode. It shows the current cont
 
 All numbers are approximate and counted with `gpt-tokenizer` using the OpenAI o200k tokenizer. For Claude, Copilot, and other non-OpenAI models, treat the numbers as a ballpark.
 
+![Token Monsters sidebar screenshot](assets/screenshot.svg)
+
 ## Install
 
 Add the plugin to your OpenCode config.
