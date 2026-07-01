@@ -21,6 +21,14 @@ Add the plugin to your OpenCode config.
 
 Restart OpenCode after saving. OpenCode installs npm plugins automatically at startup.
 
+## Install with OpenCode
+
+Paste this prompt into OpenCode:
+
+```text
+Install the OpenCode plugin @aundal/opencode-token-monsters@latest into my global OpenCode config. Preserve my existing config, add it to the plugin array if it is missing, validate the config shape against https://opencode.ai/config.json, and tell me to restart OpenCode when done.
+```
+
 ## Usage
 
 Token Monsters appears in the session sidebar.
