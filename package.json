@@ -51,9 +51,9 @@
     "tui"
   ],
   "dependencies": {
-    "@opentui/solid": "^0.4.0",
+    "@opentui/solid": "0.4.0",
     "gpt-tokenizer": "^3.4.0",
-    "solid-js": "^1.9.13"
+    "solid-js": "1.9.12"
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^1.4.7",
