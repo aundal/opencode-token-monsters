@@ -8,7 +8,7 @@ All numbers are approximate and counted with `gpt-tokenizer` using the OpenAI o2
 
 ## Install
 
-Add the plugin to your OpenCode config.
+Add the plugin to both OpenCode config files.
 
 `~/.config/opencode/opencode.json`
 
@@ -23,12 +23,23 @@ Add the plugin to your OpenCode config.
 
 Restart OpenCode after saving. OpenCode installs npm plugins automatically at startup.
 
+`~/.config/opencode/tui.json`
+
+```json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    "@aundal/opencode-token-monsters@latest"
+  ]
+}
+```
+
 ## Install with OpenCode
 
 Paste this prompt into OpenCode:
 
 ```text
-Install the OpenCode plugin @aundal/opencode-token-monsters@latest into my global OpenCode config. Preserve my existing config, add it to the plugin array if it is missing, validate the config shape against https://opencode.ai/config.json, and tell me to restart OpenCode when done.
+Install the OpenCode plugin @aundal/opencode-token-monsters@latest into my global opencode.json and tui.json plugin arrays. Preserve my existing config, validate config shapes against https://opencode.ai/config.json and https://opencode.ai/tui.json, and tell me to restart OpenCode when done.
 ```
 
 ## Usage
