@@ -65,15 +65,41 @@ const sessions = new Map<string, SessionState>()
 // Tool-definition buffer for the request currently being assembled.
 let buf = { sum: 0, ids: new Set<string>(), byTool: {} as Record<string, number>, done: false }
 
+function readCachedSession(id: string): any | undefined {
+  try {
+    if (!existsSync(CACHE_FILE)) return
+    const data = JSON.parse(readFileSync(CACHE_FILE, "utf8"))
+    return data?.sessions?.[id]
+  } catch {
+    return
+  }
+}
+
+function mergeEntriesByOrder(existing: MsgEntry[], incoming: MsgEntry[]): MsgEntry[] {
+  const out = [...(existing || [])]
+  for (const entry of incoming || []) {
+    const idx = out.findIndex((e) => e.r === entry.r && e.o === entry.o)
+    if (idx >= 0) out[idx] = entry
+    else out.push(entry)
+  }
+  return out.sort((a, b) => a.o - b.o)
+}
+
 function session(id: string): SessionState {
   let s = sessions.get(id)
   if (!s) {
+    const cached = readCachedSession(id)
+    const unique = new Map<string, MsgEntry>()
+    for (const [idx, entry] of (cached?.total || []).entries()) {
+      unique.set(`cached:${entry.o}:${entry.r}:${idx}`, entry)
+    }
+
     s = {
-      reqCount: 0,
-      overheadCurrent: { opencode: 0, agents: 0, skillDefs: 0, toolDefs: 0 },
-      overheadTotal: { opencode: 0, agents: 0, skillDefs: 0, toolDefs: 0 },
-      current: [],
-      unique: new Map(),
+      reqCount: cached?.reqCount || 0,
+      overheadCurrent: cached?.overheadCurrent || { opencode: 0, agents: 0, skillDefs: 0, toolDefs: 0 },
+      overheadTotal: cached?.overheadTotal || { opencode: 0, agents: 0, skillDefs: 0, toolDefs: 0 },
+      current: cached?.current || [],
+      unique,
     }
     sessions.set(id, s)
   }
@@ -86,9 +112,21 @@ function scheduleWrite() {
   writeTimer = setTimeout(() => {
     writeTimer = undefined
     try {
-      const out: any = { sessions: {}, updatedAt: Date.now() }
+      let out: any = { sessions: {}, updatedAt: Date.now() }
+      try {
+        if (existsSync(CACHE_FILE)) {
+          out = JSON.parse(readFileSync(CACHE_FILE, "utf8"))
+          if (!out || typeof out !== "object") out = { sessions: {} }
+          if (!out.sessions || typeof out.sessions !== "object") out.sessions = {}
+          out.updatedAt = Date.now()
+        }
+      } catch {
+        out = { sessions: {}, updatedAt: Date.now() }
+      }
+
       for (const [id, s] of sessions) {
-        const total = [...s.unique.values()].sort((a, b) => a.o - b.o)
+        const cachedTotal = out.sessions?.[id]?.total || []
+        const total = mergeEntriesByOrder(cachedTotal, [...s.unique.values()])
         out.sessions[id] = {
           reqCount: s.reqCount,
           overheadCurrent: s.overheadCurrent,

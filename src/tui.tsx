@@ -5,8 +5,8 @@
 //
 // Reads the per-request breakdown written by token-usage-capture.ts. Two
 // selectors:
-//   Session:  Total   (everything since session start, survives compaction)
-//             Aktuel  (the last request only)
+//   Session:  Actual  (active session, survives compaction)
+//             Total   (all cached sessions)
 //   View:     Prompts (per message: Input / Output / Tool calls / Files)
 //             Tools   (aggregated: Input, Output, Tools by type)
 //
@@ -21,6 +21,7 @@ const REFRESH_MS = 8000
 const EVENT_DEBOUNCE_MS = 700
 const TOOL_ROWS = 8
 const LABEL_W = 18
+const OPEN_KV_KEY = "tm_open"
 
 // Sidebar on/off, toggled by the /tokenmonster command. Persisted in kv so it
 // survives restarts; a module-level signal lets the command hide/show every
@@ -54,7 +55,13 @@ async function readCapture(api, sessionID) {
     const file = Bun.file(`${dir.replace(/[\\/]+$/, "")}/.token-usage-cache.json`)
     if (!(await file.exists())) return null
     const data = await file.json()
-    return data?.sessions?.[sessionID] || null
+    const all = { total: [], overheadTotal: {} }
+    for (const session of Object.values(data?.sessions || {})) {
+      all.total.push(...(session?.total || []))
+      mergeTools(all.overheadTotal, session?.overheadTotal || {})
+    }
+    all.total.sort((a, b) => (a?.o || 0) - (b?.o || 0))
+    return { session: data?.sessions?.[sessionID] || null, all }
   } catch {
     return null
   }
@@ -364,9 +371,9 @@ function Selector(props) {
       <box width={8}>
         <text fg={props.colors.muted}>{`${props.label}:`}</text>
       </box>
-      <text fg={props.colors.muted} onMouseDown={props.onToggle}>{"<"}</text>
+      <text fg={props.colors.muted} onMouseUp={props.onToggle}>{"<"}</text>
       <text fg={props.colors.accent}><b>{props.value}</b></text>
-      <text fg={props.colors.muted} onMouseDown={props.onToggle}>{">"}</text>
+      <text fg={props.colors.muted} onMouseUp={props.onToggle}>{">"}</text>
     </box>
   )
 }
@@ -383,7 +390,7 @@ function TreeRow(props) {
   }
   return (
     <box flexDirection="column" gap={0}>
-      <box flexDirection="row" gap={1} alignItems="center" title={node.fullLabel || node.label} onMouseDown={click}>
+      <box flexDirection="row" gap={1} alignItems="center" title={node.fullLabel || node.label} onMouseUp={click}>
         <box width={LABEL_W}>
           <text fg={props.depth > 0 ? props.colors.muted : props.colors.text}>{clip(labelStr(), LABEL_W)}</text>
         </box>
@@ -412,15 +419,20 @@ function TreeRow(props) {
 function View(props) {
   const api = props.api
   const [capture, setCapture] = createSignal(null)
-  const [open, setOpen] = createSignal(false)
+  const [open, setOpen] = createSignal(api.kv?.get?.(OPEN_KV_KEY, false) === true)
   const [expanded, setExpanded] = createSignal({})
   const [detail, setDetail] = createSignal("")
-  const [scope, setScope] = createSignal(api.kv?.get?.("tm_scope", "total") || "total")
+  const [scope, setScope] = createSignal(api.kv?.get?.("tm_scope", "actual") || "actual")
   const [view, setView] = createSignal(api.kv?.get?.("tm_view", "prompt") || "prompt")
 
   const toggle = (path) => setExpanded((e) => ({ ...e, [path]: !e[path] }))
   const toggleDetail = (label) => setDetail((cur) => cur === label ? "" : label)
-  const toggleScope = () => { const v = scope() === "total" ? "current" : "total"; try { api.kv?.set?.("tm_scope", v) } catch {} ; setScope(v) }
+  const toggleOpen = () => {
+    const next = !open()
+    try { api.kv?.set?.(OPEN_KV_KEY, next) } catch {}
+    setOpen(next)
+  }
+  const toggleScope = () => { const v = scope() === "total" ? "actual" : "total"; try { api.kv?.set?.("tm_scope", v) } catch {} ; setScope(v) }
   const toggleView = () => { const v = view() === "prompt" ? "tool" : "prompt"; try { api.kv?.set?.("tm_view", v) } catch {} ; setView(v) }
 
   let disposed = false
@@ -466,24 +478,27 @@ function View(props) {
 
   const model = createMemo(() => {
     const live = buildFallback(api, props.session_id)
-    const cap = capture() || live
+    const raw = capture()
+    const cap = raw?.session || live
     const sc = scope()
-    if (!cap || (!Array.isArray(cap.current) && !Array.isArray(cap.total))) return { ready: false, list: [] }
-    const entries = sc === "total"
-      ? mergeLiveEntries(cap.total || [], live.total || [])
-      : mergeLiveEntries(cap.current || [], live.current || [])
-    const ov = sc === "total" ? cap.overheadTotal || {} : cap.overheadCurrent || {}
-    return { ready: true, list: buildList(entries, ov, sc === "total" ? "total" : "current", view()) }
+    if (sc === "total") {
+      const all = raw?.all || { total: cap.total || [], overheadTotal: cap.overheadTotal || {} }
+      const entries = mergeLiveEntries(all.total || [], live.total || [])
+      return { ready: true, list: buildList(entries, all.overheadTotal || {}, "total", view()) }
+    }
+    if (!cap || !Array.isArray(cap.total)) return { ready: false, list: [] }
+    const entries = mergeLiveEntries(cap.total || [], live.total || [])
+    return { ready: true, list: buildList(entries, cap.overheadTotal || {}, "actual", view()) }
   })
 
   const colors = () => palette(api)
-  const scopeLabel = () => (scope() === "total" ? "Total" : "Aktuel")
+  const scopeLabel = () => (scope() === "total" ? "Total" : "Actual")
   const viewLabel = () => (view() === "prompt" ? "Prompts" : "Tools")
 
   return (
     <Show when={props.session_id && enabled()}>
       <box flexDirection="column" gap={0}>
-        <box flexDirection="row" gap={1} alignItems="center" onMouseDown={() => setOpen((o) => !o)}>
+        <box flexDirection="row" gap={1} alignItems="center" onMouseDown={toggleOpen}>
           <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
           <text fg={colors().text}><b>Token Monsters:</b></text>
           <Show when={!open() && head().has}>
@@ -506,13 +521,13 @@ function View(props) {
               <Show when={detail()}>
                 <box flexDirection="column" gap={0} paddingTop={1}>
                   <text fg={colors().muted}>Selected path</text>
-                  <text fg={colors().muted} onMouseDown={() => setDetail("")}>{detail()}</text>
+                  <text fg={colors().muted} onMouseUp={() => setDetail("")}>{detail()}</text>
                 </box>
               </Show>
             </box>
 
             <box flexDirection="column" gap={0} paddingTop={1}>
-              <text fg={colors().muted}>{scope() === "total" ? "Total session ~approx" : "This prompt ~approx"}</text>
+              <text fg={colors().muted}>{scope() === "total" ? "All sessions ~approx" : "Actual session ~approx"}</text>
               <Show when={model().ready} fallback={<text fg={colors().muted}>No session data</text>}>
                 <For each={model().list}>
                   {(item) => <TreeRow node={item} depth={0} path={item.label} colors={colors()} expanded={expanded} toggle={toggle} toggleDetail={toggleDetail} />}
