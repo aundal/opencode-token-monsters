@@ -2,6 +2,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { countTokens } from "gpt-tokenizer"
 import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 
 // ---------------------------------------------------------------------------
@@ -23,7 +24,7 @@ import { dirname, join } from "node:path"
 // ---------------------------------------------------------------------------
 
 const CONFIG_DIR = dirname(import.meta.dir)
-const CACHE_FILE = join(CONFIG_DIR, ".token-usage-cache.json")
+const CACHE_FILE = join(homedir(), ".config", "opencode", ".token-usage-cache.json")
 const WRITE_DEBOUNCE_MS = 750
 
 const tok = (s: string) => {

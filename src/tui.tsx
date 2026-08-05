@@ -14,6 +14,7 @@
 // in both scopes. Counts are o200k: exact for OpenAI models, ~approx otherwise.
 
 import { createMemo, createSignal, onCleanup, onMount, For, Show } from "solid-js"
+import { dirname, join } from "node:path"
 
 const PLUGIN_ID = "token-usage"
 const DEFAULT_ORDER = 150
@@ -23,10 +24,11 @@ const TOOL_ROWS = 8
 const LABEL_W = 18
 const OPEN_KV_KEY = "tm_open"
 
-// Sidebar on/off, toggled by the /tokenmonster command. Persisted in kv so it
-// survives restarts; a module-level signal lets the command hide/show every
-// mounted sidebar instance live without a restart.
+// Sidebar visibility and fold state are module-level so /tokenmonster affects
+// every mounted sidebar instance live without a restart.
 const [enabled, setEnabled] = createSignal(true)
+const [panelOpen, setPanelOpen] = createSignal(false)
+const CACHE_FILE = join(dirname(import.meta.dir), ".token-usage-cache.json")
 
 const NUM = new Intl.NumberFormat("en-US")
 const fmt = (n) => NUM.format(Math.round(Number(n) || 0))
@@ -50,18 +52,24 @@ const sumVals = (obj) => Object.values(obj || {}).reduce((a, b) => a + (Number(b
 async function readCapture(api, sessionID) {
   try {
     if (typeof Bun === "undefined") return null
+    const paths = [CACHE_FILE]
     const dir = api.state?.path?.config
-    if (!dir) return null
-    const file = Bun.file(`${dir.replace(/[\\/]+$/, "")}/.token-usage-cache.json`)
-    if (!(await file.exists())) return null
-    const data = await file.json()
-    const all = { total: [], overheadTotal: {} }
-    for (const session of Object.values(data?.sessions || {})) {
-      all.total.push(...(session?.total || []))
-      mergeTools(all.overheadTotal, session?.overheadTotal || {})
+    if (dir) paths.push(`${dir.replace(/[\\/]+$/, "")}/.token-usage-cache.json`)
+    for (const path of paths) {
+      const file = Bun.file(path)
+      if (!(await file.exists())) continue
+      const data = await file.json()
+      const all = { total: [], overheadTotal: {} }
+      for (const session of Object.values(data?.sessions || {}) as any[]) {
+        all.total.push(...(session?.total || []))
+        mergeTools(all.overheadTotal, session?.overheadTotal || {})
+      }
+      all.total.sort((a, b) => (a?.o || 0) - (b?.o || 0))
+      const sessions = Object.values(data?.sessions || {}) as any[]
+      const fallback = sessions.sort((a, b) => ((b?.total || []).length + (b?.current || []).length) - ((a?.total || []).length + (a?.current || []).length))[0] || null
+      return { session: data?.sessions?.[sessionID] || fallback, all }
     }
-    all.total.sort((a, b) => (a?.o || 0) - (b?.o || 0))
-    return { session: data?.sessions?.[sessionID] || null, all }
+    return null
   } catch {
     return null
   }
@@ -419,12 +427,17 @@ function TreeRow(props) {
 function View(props) {
   const api = props.api
   const [capture, setCapture] = createSignal(null)
-  const [open, setOpen] = createSignal(api.kv?.get?.(OPEN_KV_KEY, false) === true)
   const [expanded, setExpanded] = createSignal({})
   const [detail, setDetail] = createSignal("")
   const [scope, setScope] = createSignal(api.kv?.get?.("tm_scope", "actual") || "actual")
   const [view, setView] = createSignal(api.kv?.get?.("tm_view", "prompt") || "prompt")
 
+  const open = panelOpen
+  const setOpen = setPanelOpen
+  const sessionID = () => {
+    const route = api.route?.current
+    return props.session_id || (route?.name === "session" && typeof route.params?.sessionID === "string" ? route.params.sessionID : undefined)
+  }
   const toggle = (path) => setExpanded((e) => ({ ...e, [path]: !e[path] }))
   const toggleDetail = (label) => setDetail((cur) => cur === label ? "" : label)
   const toggleOpen = () => {
@@ -438,7 +451,7 @@ function View(props) {
   let disposed = false
   let unsubscribe, timer, debounce
 
-  const refreshCapture = () => readCapture(api, props.session_id).then((d) => !disposed && setCapture(d)).catch(() => {})
+  const refreshCapture = () => readCapture(api, sessionID()).then((d) => !disposed && setCapture(d)).catch(() => {})
 
   onMount(() => {
     refreshCapture()
@@ -456,28 +469,8 @@ function View(props) {
     if (debounce) clearTimeout(debounce)
   })
 
-  const head = createMemo(() => {
-    const id = props.session_id
-    let last
-    if (id) {
-      const messages = api.state.session.messages(id) || []
-      for (const m of messages) if (m.role === "assistant" && (m.tokens?.output || 0) > 0) last = m
-    }
-    const ctx = last ? (last.tokens.input || 0) + (last.tokens.output || 0) + (last.tokens.cache?.read || 0) + (last.tokens.cache?.write || 0) : 0
-    let limit = 0
-    try {
-      if (last) limit = api.state.provider.find((p) => p.id === last.providerID)?.models?.[last.modelID]?.limit?.context || 0
-    } catch {}
-    return {
-      has: !!last,
-      contextNow: ctx,
-      cachedPct: ctx > 0 && last ? Math.round(((last.tokens.cache?.read || 0) / ctx) * 100) : 0,
-      limitPct: limit > 0 ? Math.round((ctx / limit) * 100) : 0,
-    }
-  })
-
   const model = createMemo(() => {
-    const live = buildFallback(api, props.session_id)
+    const live = buildFallback(api, sessionID())
     const raw = capture()
     const cap = raw?.session || live
     const sc = scope()
@@ -491,12 +484,33 @@ function View(props) {
     return { ready: true, list: buildList(entries, cap.overheadTotal || {}, "actual", view()) }
   })
 
+  const head = createMemo(() => {
+    const id = sessionID()
+    let last
+    if (id) {
+      const messages = api.state.session.messages(id) || []
+      for (const m of messages) if (m.role === "assistant" && (m.tokens?.total || m.tokens?.output || 0) > 0) last = m
+    }
+    if (last?.tokens) {
+      const total = last.tokens.total || (last.tokens.input || 0) + (last.tokens.output || 0) + (last.tokens.cache?.read || 0) + (last.tokens.cache?.write || 0)
+      const cacheRead = last.tokens.cache?.read
+      const cachedPct = typeof cacheRead === "number" && total > 0 ? Math.round((cacheRead / total) * 100) : undefined
+      return { has: total > 0, contextNow: total, cachedPct, limitPct: 0 }
+    }
+    const cap = capture()?.session
+    const current = Array.isArray(cap?.current) ? cap.current : []
+    const ov = cap?.overheadCurrent || {}
+    const overhead = (ov.opencode || 0) + (ov.agents || 0) + (ov.skillDefs || 0) + (ov.toolDefs || 0)
+    const total = overhead + current.reduce((sum, entry) => sum + entryTotal(entry), 0)
+    return { has: total > 0, contextNow: total, cachedPct: undefined, limitPct: 0 }
+  })
+
   const colors = () => palette(api)
   const scopeLabel = () => (scope() === "total" ? "Total" : "Actual")
   const viewLabel = () => (view() === "prompt" ? "Prompts" : "Tools")
 
   return (
-    <Show when={props.session_id && enabled()}>
+    <Show when={enabled()}>
       <box flexDirection="column" gap={0}>
         <box flexDirection="row" gap={1} alignItems="center" onMouseDown={toggleOpen}>
           <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
@@ -517,7 +531,7 @@ function View(props) {
 
             <box flexDirection="column" gap={0} paddingTop={1}>
               <Line colors={colors()} label="Context now" value={head().limitPct > 0 ? `${fmt(head().contextNow)} · ${head().limitPct}%` : fmt(head().contextNow)} strong />
-              <Line colors={colors()} label="Cache hit" value={`${head().cachedPct}%`} strong />
+              <Line colors={colors()} label="Cache hit" value={head().cachedPct === undefined ? "-" : `${head().cachedPct}%`} strong />
               <Show when={detail()}>
                 <box flexDirection="column" gap={0} paddingTop={1}>
                   <text fg={colors().muted}>Selected path</text>
@@ -541,14 +555,14 @@ function View(props) {
   )
 }
 
-// Register the /tokenmonster slash command + command-palette entry that toggles
+// Register the /tokenmonster slash command + command-palette entry that folds
 // the sidebar panel. The running opencode (1.17+) exposes api.keymap.registerLayer
 // (slashName/run); older typed builds expose api.command.register (slash/onSelect).
 // Support both so the toggle works regardless of host version.
 function registerCommand(api, toggle) {
   const def = {
     name: "tokenmonster.toggle",
-    title: "Token Monsters: toggle sidebar",
+    title: "Token Monsters: fold sidebar",
     category: "Token Monsters",
     namespace: "palette",
     slashName: "tokenmonster",
@@ -574,11 +588,16 @@ export const TokenMonsters = {
   async tui(api, options) {
     if (options?.enabled === false) return
     try { setEnabled(api.kv?.get?.("tm_enabled", true) !== false) } catch {}
+    try { setPanelOpen(api.kv?.get?.("tm_open", false) === true) } catch {}
     const toggle = () => {
-      const v = !enabled()
-      try { api.kv?.set?.("tm_enabled", v) } catch {}
-      setEnabled(v)
-      try { api.ui?.toast?.({ variant: v ? "success" : "info", message: `Token Monsters ${v ? "shown" : "hidden"}` }) } catch {}
+      if (!enabled()) {
+        try { api.kv?.set?.("tm_enabled", true) } catch {}
+        setEnabled(true)
+      }
+      const v = !panelOpen()
+      try { api.kv?.set?.("tm_open", v) } catch {}
+      setPanelOpen(v)
+      try { api.ui?.toast?.({ variant: v ? "success" : "info", message: `Token Monsters ${v ? "expanded" : "collapsed"}` }) } catch {}
     }
     registerCommand(api, toggle)
     const order = typeof options?.order === "number" ? options.order : DEFAULT_ORDER
