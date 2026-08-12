@@ -343,6 +343,64 @@ function setFrac(nodes) {
 }
 
 // ---------------------------------------------------------------------------
+// Real usage from opencode.
+//
+// opencode reports the true context window occupancy on the last assistant
+// message (AssistantMessage.tokens). Our gpt-tokenizer sums every stored
+// tool output in the history, but opencode compacts/drops most of those from
+// the live context, so the raw sum can run much too high. We take opencode's
+// number as ground truth for the headline and anchor the tokenized breakdown
+// to it.
+// ---------------------------------------------------------------------------
+
+function realUsage(api, sessionID) {
+  try {
+    const messages = api.state?.session?.messages?.(sessionID) || []
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m?.role !== "assistant") continue
+      const t = m?.tokens
+      if (!t) continue
+      const input = Number(t.input) || 0
+      const output = Number(t.output) || 0
+      const reasoning = Number(t.reasoning) || 0
+      const read = Number(t.cache?.read) || 0
+      const write = Number(t.cache?.write) || 0
+      const context = input + read + write + output + reasoning
+      if (context > 0) {
+        const inputSide = input + read + write
+        const cachedPct = inputSide > 0 ? Math.round((read / inputSide) * 100) : undefined
+        return { context, cachedPct }
+      }
+    }
+  } catch {}
+  return null
+}
+
+function anchorList(list, realTotal) {
+  if (!Array.isArray(list) || !(realTotal > 0)) return list
+  const overheadNode = list.find((n) => n && n.label === "Overhead")
+  const overheadTok = overheadNode ? Number(overheadNode.tokens) || 0 : 0
+  const grandTok = list.reduce((s, n) => s + (Number(n?.tokens) || 0), 0)
+  const contentTok = grandTok - overheadTok
+  const scaleNode = (n, f) => {
+    n.tokens = Math.round((Number(n.tokens) || 0) * f)
+    if (n.children) for (const c of n.children) scaleNode(c, f)
+  }
+  if (realTotal > overheadTok && contentTok > 0) {
+    const f = (realTotal - overheadTok) / contentTok
+    for (const n of list) {
+      if (n === overheadNode) continue
+      scaleNode(n, f)
+    }
+  } else {
+    const f = grandTok > 0 ? realTotal / grandTok : 0
+    for (const n of list) scaleNode(n, f)
+  }
+  return list
+}
+
+// ---------------------------------------------------------------------------
 // UI primitives.
 // ---------------------------------------------------------------------------
 
@@ -431,6 +489,7 @@ function View(props) {
   const [detail, setDetail] = createSignal("")
   const [scope, setScope] = createSignal(api.kv?.get?.("tm_scope", "actual") || "actual")
   const [view, setView] = createSignal(api.kv?.get?.("tm_view", "prompt") || "prompt")
+  const [tick, setTick] = createSignal(0)
 
   const open = panelOpen
   const setOpen = setPanelOpen
@@ -456,11 +515,12 @@ function View(props) {
   onMount(() => {
     refreshCapture()
     unsubscribe = api.event.on("message.updated", () => {
+      setTick((n) => n + 1)
       setCapture((v) => v ? { ...v } : v)
       if (debounce) clearTimeout(debounce)
       debounce = setTimeout(refreshCapture, EVENT_DEBOUNCE_MS)
     })
-    timer = setInterval(refreshCapture, REFRESH_MS)
+    timer = setInterval(() => { setTick((n) => n + 1); refreshCapture() }, REFRESH_MS)
   })
   onCleanup(() => {
     disposed = true
@@ -470,6 +530,7 @@ function View(props) {
   })
 
   const model = createMemo(() => {
+    tick()
     const live = buildFallback(api, sessionID())
     const raw = capture()
     const cap = raw?.session || live
@@ -480,23 +541,20 @@ function View(props) {
       return { ready: true, list: buildList(entries, all.overheadTotal || {}, "total", view()) }
     }
     if (!cap || !Array.isArray(cap.total)) return { ready: false, list: [] }
-    const entries = mergeLiveEntries(cap.total || [], live.total || [])
-    return { ready: true, list: buildList(entries, cap.overheadTotal || {}, "actual", view()) }
+    const entries = mergeLiveEntries((cap.current?.length ? cap.current : cap.total) || [], live.current || [])
+    const list = buildList(entries, cap.overheadCurrent || {}, "current", view())
+    const real = realUsage(api, sessionID())
+    if (real && real.context > 0) {
+      anchorList(list, real.context)
+      setFrac(list)
+    }
+    return { ready: true, list }
   })
 
   const head = createMemo(() => {
-    const id = sessionID()
-    let last
-    if (id) {
-      const messages = api.state.session.messages(id) || []
-      for (const m of messages) if (m.role === "assistant" && (m.tokens?.total || m.tokens?.output || 0) > 0) last = m
-    }
-    if (last?.tokens) {
-      const total = last.tokens.total || (last.tokens.input || 0) + (last.tokens.output || 0) + (last.tokens.cache?.read || 0) + (last.tokens.cache?.write || 0)
-      const cacheRead = last.tokens.cache?.read
-      const cachedPct = typeof cacheRead === "number" && total > 0 ? Math.round((cacheRead / total) * 100) : undefined
-      return { has: total > 0, contextNow: total, cachedPct, limitPct: 0 }
-    }
+    tick()
+    const real = realUsage(api, sessionID())
+    if (real) return { has: real.context > 0, contextNow: real.context, cachedPct: real.cachedPct, limitPct: 0 }
     const cap = capture()?.session
     const current = Array.isArray(cap?.current) ? cap.current : []
     const ov = cap?.overheadCurrent || {}
@@ -506,13 +564,13 @@ function View(props) {
   })
 
   const colors = () => palette(api)
-  const scopeLabel = () => (scope() === "total" ? "Total" : "Actual")
+  const scopeLabel = () => (scope() === "total" ? "Total" : "Aktuel")
   const viewLabel = () => (view() === "prompt" ? "Prompts" : "Tools")
 
   return (
     <Show when={enabled()}>
       <box flexDirection="column" gap={0}>
-        <box flexDirection="row" gap={1} alignItems="center" onMouseDown={toggleOpen}>
+        <box flexDirection="row" gap={1} alignItems="center" onMouseUp={toggleOpen}>
           <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
           <text fg={colors().text}><b>Token Monsters:</b></text>
           <Show when={!open() && head().has}>
@@ -541,7 +599,7 @@ function View(props) {
             </box>
 
             <box flexDirection="column" gap={0} paddingTop={1}>
-              <text fg={colors().muted}>{scope() === "total" ? "All sessions ~approx" : "Actual session ~approx"}</text>
+              <text fg={colors().muted}>{scope() === "total" ? "Total session ~approx" : "Context now ~approx"}</text>
               <Show when={model().ready} fallback={<text fg={colors().muted}>No session data</text>}>
                 <For each={model().list}>
                   {(item) => <TreeRow node={item} depth={0} path={item.label} colors={colors()} expanded={expanded} toggle={toggle} toggleDetail={toggleDetail} />}
