@@ -439,6 +439,12 @@ function View(props) {
   }
   const toggle = (path) => setExpanded((e) => ({ ...e, [path]: !e[path] }))
   const toggleDetail = (label) => setDetail((cur) => cur === label ? "" : label)
+  const toggleOpen = (evt) => {
+    evt?.stopPropagation?.()
+    const next = !open()
+    try { api.kv?.set?.("tm_open", next) } catch {}
+    setOpen(next)
+  }
   const toggleScope = () => { const v = scope() === "total" ? "current" : "total"; try { api.kv?.set?.("tm_scope", v) } catch {} ; setScope(v) }
   const toggleView = () => { const v = view() === "prompt" ? "tool" : "prompt"; try { api.kv?.set?.("tm_view", v) } catch {} ; setView(v) }
 
@@ -502,12 +508,6 @@ function View(props) {
   const colors = () => palette(api)
   const scopeLabel = () => (scope() === "total" ? "Total" : "Aktuel")
   const viewLabel = () => (view() === "prompt" ? "Prompts" : "Tools")
-  const toggleOpen = (evt) => {
-    evt?.stopPropagation?.()
-    const next = !open()
-    try { api.kv?.set?.("tm_open", next) } catch {}
-    setOpen(next)
-  }
 
   return (
     <Show when={enabled()}>
@@ -516,7 +516,7 @@ function View(props) {
           flexDirection="row"
           gap={1}
           alignItems="center"
-          onMouseUp={toggleOpen}
+          onMouseDown={toggleOpen}
         >
           <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
           <text fg={colors().text}><b>Token Monsters:</b></text>
@@ -595,10 +595,6 @@ export const TokenMonsters = {
     try { setEnabled(api.kv?.get?.("tm_enabled", true) !== false) } catch {}
     try { setPanelOpen(api.kv?.get?.("tm_open", false) === true) } catch {}
     const toggle = () => {
-      if (!enabled()) {
-        try { api.kv?.set?.("tm_enabled", true) } catch {}
-        setEnabled(true)
-      }
       const v = !panelOpen()
       try { api.kv?.set?.("tm_open", v) } catch {}
       setPanelOpen(v)
