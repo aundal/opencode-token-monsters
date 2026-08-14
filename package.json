@@ -1,6 +1,6 @@
 {
   "name": "@aundal/opencode-token-monsters",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "OpenCode plugin that shows Token Monsters token usage breakdowns in the TUI sidebar.",
   "author": "aundal",
   "license": "MIT",
@@ -56,7 +56,7 @@
     "solid-js": "1.9.12"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "^1.4.7",
+    "@opencode-ai/plugin": "1.17.6",
     "bun-types": "^1.2.19",
     "@types/node": "^24.0.7",
     "typescript": "^5.8.3"
