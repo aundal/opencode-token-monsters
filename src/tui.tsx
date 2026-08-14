@@ -1,417 +1,240 @@
 /** @jsxImportSource @opentui/solid */
 // @ts-nocheck
 
-// Token Monsters - opencode token-usage sidebar.
-//
-// Reads the per-request breakdown written by token-usage-capture.ts. Two
-// selectors:
-//   Session:  Total   (everything since session start, survives compaction)
-//             Aktuel  (the last request only)
-//   View:     Prompts (per message: Input / Output / Tool calls / Files)
-//             Tools   (aggregated: Input, Output, Tools by type)
-//
-// Overhead (opencode prompt, AGENTS.md, tool defs, skill defs, Skills) is shown
-// in both scopes. Counts are o200k: exact for OpenAI models, ~approx otherwise.
-
-import { createMemo, createSignal, onCleanup, onMount, For, Show } from "solid-js"
-import { dirname, join } from "node:path"
+import { createMemo, createSignal, For, onCleanup, onMount, Show } from "solid-js"
 
 const PLUGIN_ID = "token-usage"
 const DEFAULT_ORDER = 150
+const OPEN_KV_KEY = "tm_open"
+const SCOPE_KV_KEY = "tm_scope"
+const VIEW_KV_KEY = "tm_view"
 const REFRESH_MS = 8000
 const EVENT_DEBOUNCE_MS = 700
 const TOOL_ROWS = 8
 const LABEL_W = 18
 
-// Sidebar visibility and fold state are module-level so /tokenmonster affects
-// every mounted sidebar instance live without a restart.
-const [enabled, setEnabled] = createSignal(true)
-const [panelOpen, setPanelOpen] = createSignal(false)
-const CACHE_FILE = join(dirname(import.meta.dir), ".token-usage-cache.json")
+let toggleOpenFromCommand: (() => void) | undefined
 
-const NUM = new Intl.NumberFormat("en-US")
-const fmt = (n) => NUM.format(Math.round(Number(n) || 0))
-const fmtK = (n) => {
-  n = Number(n) || 0
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(Math.round(n))
-}
-const tokGuess = (s) => Math.ceil(String(s || "").length / 4)
-const clip = (v, w) => {
-  const s = String(v)
-  return s.length <= w ? s : `${s.slice(0, Math.max(0, w - 1))}…`
-}
-const sumVals = (obj) => Object.values(obj || {}).reduce((a, b) => a + (Number(b) || 0), 0)
+const sumValues = (obj) => Object.values(obj || {}).reduce((sum, value) => sum + (Number(value) || 0), 0)
 
-// ---------------------------------------------------------------------------
-// Cache read.
-// ---------------------------------------------------------------------------
-
-async function readCapture(api, sessionID) {
-  try {
-    if (typeof Bun === "undefined") return null
-    const paths = [CACHE_FILE]
-    const dir = api.state?.path?.config
-    if (dir) paths.push(`${dir.replace(/[\\/]+$/, "")}/.token-usage-cache.json`)
-    for (const path of paths) {
-      const file = Bun.file(path)
-      if (!(await file.exists())) continue
-      const data = await file.json()
-      const all = { total: [], overheadTotal: {} }
-      for (const session of Object.values(data?.sessions || {}) as any[]) {
-        all.total.push(...(session?.total || []))
-        mergeTools(all.overheadTotal, session?.overheadTotal || {})
-      }
-      all.total.sort((a, b) => (a?.o || 0) - (b?.o || 0))
-      const sessions = Object.values(data?.sessions || {}) as any[]
-      const fallback = sessions.sort((a, b) => ((b?.total || []).length + (b?.current || []).length) - ((a?.total || []).length + (a?.current || []).length))[0] || null
-      return { session: data?.sessions?.[sessionID] || fallback, all }
-    }
-    return null
-  } catch {
-    return null
-  }
+function entryTotal(entry) {
+  return (Number(entry?.in) || 0) + (Number(entry?.out) || 0) + sumValues(entry?.t) + (Number(entry?.f) || 0) + (Number(entry?.s) || 0)
 }
 
-function fileLabel(p) {
-  const raw = p?.filename || p?.source?.path || p?.url || "file"
-  const base = String(raw).split(/[\\/]/).pop() || String(raw)
-  return base || "file"
+function overheadTotal(overhead) {
+  return (Number(overhead?.opencode) || 0) + (Number(overhead?.agents) || 0) + (Number(overhead?.skillDefs) || 0) + (Number(overhead?.toolDefs) || 0)
 }
 
-function shortTarget(raw) {
-  if (typeof raw !== "string") return
-  const s = raw.trim()
-  if (!s) return
-  if (/^https?:\/\//i.test(s)) return s
-  if (/^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("/") || s.startsWith("./") || s.startsWith("../") || s.includes("\\") || s.includes("/")) return s
+function entryBreakdown(entries) {
+  return (entries || []).reduce((acc, entry) => ({
+    input: acc.input + (Number(entry?.in) || 0),
+    output: acc.output + (Number(entry?.out) || 0),
+    tools: acc.tools + sumValues(entry?.t),
+    files: acc.files + (Number(entry?.f) || 0),
+    skills: acc.skills + (Number(entry?.s) || 0),
+  }), { input: 0, output: 0, tools: 0, files: 0, skills: 0 })
 }
 
-function addTarget(bucket, raw) {
-  const key = shortTarget(raw)
-  if (key) bucket[key] = (bucket[key] || 0) + 1
+function detailedMergeTools(target, source) {
+  for (const [key, value] of Object.entries(source || {})) target[key] = (target[key] || 0) + (Number(value) || 0)
 }
 
-function collectTargets(name, input, output) {
-  const out = {}
-  const add = (raw) => addTarget(out, raw)
-  if (name === "read" || name === "edit" || name === "write") add(input?.filePath)
-  else if (name === "webfetch") add(input?.url)
-  else if (name === "apply_patch") {
-    const patch = typeof input?.patchText === "string" ? input.patchText : ""
-    for (const m of patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) add(m[1])
-  }
-  else if (name === "glob") add(input?.pattern)
-  else if (name === "grep") {
-    add(input?.include)
-    add(input?.path)
-  }
-  else if (name === "bash") {
-    add(input?.workdir)
-    const m = typeof output === "string" ? output.match(/\b([A-Za-z]:\\[^\r\n]+|\/[A-Za-z0-9._\/-]+(?:\.[A-Za-z0-9_-]+)?|https?:\/\/\S+)/g) : null
-    for (const hit of m || []) add(hit)
-  } else {
-    for (const v of Object.values(input || {})) {
-      if (typeof v === "string") add(v)
-      else if (Array.isArray(v)) for (const x of v) add(x)
-    }
-  }
-  return Object.keys(out)
-}
+function detailedToolChildren(toolsObj, countsObj, targetsObj) {
+  const items = Object.entries(toolsObj || {})
+    .map(([name, value]) => ({ name, value: Number(value) || 0, count: Number(countsObj?.[name]) || 0, targets: targetsObj?.[name] || {} }))
+    .filter((item) => item.value > 0)
+    .sort((a, b) => b.value - a.value)
 
-function allocateTargets(targets, total) {
-  const uniq = [...new Set((targets || []).filter(Boolean))]
-  if (uniq.length === 0) return {}
-  const n = Math.max(0, Math.round(Number(total) || 0))
-  const base = Math.floor(n / uniq.length)
-  let rem = n - base * uniq.length
-  const out = {}
-  for (const key of uniq) {
-    out[key] = base + (rem > 0 ? 1 : 0)
-    if (rem > 0) rem--
-  }
-  return out
-}
-
-function toolTargets(name, input, output, totalTokens) {
-  return allocateTargets(collectTargets(name, input, output), totalTokens)
-}
-
-function fallbackEntry(message, parts) {
-  const role = message?.role === "user" ? "u" : "a"
-  const e = { r: role, in: 0, out: 0, t: {}, tc: {}, tt: {}, f: 0, fl: {}, s: 0, o: message?.time?.created || 0 }
-  for (const p of parts || []) {
-    if (p?.type === "text" && !p.synthetic && typeof p.text === "string") {
-      const n = tokGuess(p.text)
-      if (role === "u") e.in += n
-      else e.out += n
-    } else if (p?.type === "tool") {
-      const name = p.tool || "tool"
-      const out = typeof p.state?.output === "string" ? p.state.output : ""
-      const args = p.state?.input ? JSON.stringify(p.state.input) : ""
-      const n = tokGuess(out) + tokGuess(args)
-      if (name === "skill") e.s += n
-      else {
-        e.t[name] = (e.t[name] || 0) + n
-        e.tc[name] = (e.tc[name] || 0) + 1
-        const targets = toolTargets(name, p.state?.input, out, n)
-        if (Object.keys(targets).length) e.tt[name] = targets
-      }
-      for (const a of p.state?.attachments || []) {
-        const v = a?.source?.text?.value
-        if (typeof v === "string") {
-          const n = tokGuess(v)
-          e.f += n
-          const label = fileLabel(a)
-          e.fl[label] = (e.fl[label] || 0) + n
-        }
-      }
-    } else if (p?.type === "file") {
-      const v = p.source?.text?.value
-      if (typeof v === "string") {
-        const n = tokGuess(v)
-        e.f += n
-        const label = fileLabel(p)
-        e.fl[label] = (e.fl[label] || 0) + n
-      }
-    } else if (p?.type === "patch") {
-      for (const file of p.files || []) addTarget((e.tt.edit ||= {}), file)
-    }
-  }
-  return e
-}
-
-function buildFallback(api, sessionID) {
-  const messages = api.state.session.messages(sessionID) || []
-  const entries = messages.map((m) => fallbackEntry(m, api.state.part(m.id) || []))
-  return { current: entries.length ? [entries[entries.length - 1]] : [], total: entries, overheadCurrent: {}, overheadTotal: {} }
-}
-
-function entryTotal(e) {
-  return (e?.in || 0) + (e?.out || 0) + sumVals(e?.t) + (e?.f || 0) + (e?.s || 0)
-}
-
-function mergeLiveEntries(captured, live) {
-  const cap = Array.isArray(captured) ? [...captured] : []
-  const liveArr = Array.isArray(live) ? live : []
-  for (const liveEntry of liveArr) {
-    let idx = cap.findIndex((e) => e?.o === liveEntry?.o && e?.r === liveEntry?.r)
-    if (idx < 0) idx = cap.findIndex((e) => e?.r === liveEntry?.r && Math.abs((e?.o || 0) - (liveEntry?.o || 0)) < 1000)
-    if (idx >= 0) {
-      if (entryTotal(liveEntry) >= entryTotal(cap[idx])) cap[idx] = liveEntry
-    } else {
-      cap.push(liveEntry)
-    }
-  }
-  return cap.sort((a, b) => (a?.o || 0) - (b?.o || 0))
-}
-
-// ---------------------------------------------------------------------------
-// Node tree builders.  A node = { label, tokens, frac?, children? }.
-// ---------------------------------------------------------------------------
-
-function toolChildren(toolsObj, countsObj, targetsObj) {
-  const arr = Object.entries(toolsObj || {})
-    .map(([name, tokens]) => ({ name, tokens: Number(tokens) || 0, count: countsObj ? Number(countsObj[name]) || 0 : 0, targets: targetsObj?.[name] || null }))
-    .filter((t) => t.tokens > 0)
-    .sort((a, b) => b.tokens - a.tokens)
-  const withLabel = (name, count) => (countsObj && count > 0 ? `${name} (${count})` : name)
-  const targetChildren = (targets) => Object.entries(targets || {}).sort((a, b) => b[1] - a[1]).map(([full, count]) => ({ label: clip(full, LABEL_W), fullLabel: full, tokens: 0, count: Number(count) || 0 }))
-  const head = arr.slice(0, TOOL_ROWS).map((t) => ({
-    label: withLabel(t.name, t.count),
-    tokens: t.tokens,
-    children: targetChildren(t.targets),
+  const top = items.slice(0, TOOL_ROWS).map((item) => ({
+    label: item.count > 0 ? `${item.name} (${item.count})` : item.name,
+    value: formatCount(item.value),
+    children: Object.entries(item.targets)
+      .map(([target, count]) => ({ label: shortLabel(target), value: `${Math.round(Number(count) || 0)}x`, title: target }))
+      .sort((a, b) => (Number(String(b.value).replace(/[^0-9.-]/g, "")) || 0) - (Number(String(a.value).replace(/[^0-9.-]/g, "")) || 0)),
   }))
-  const rest = arr.slice(TOOL_ROWS)
-  const tail = rest.reduce((s, t) => s + t.tokens, 0)
-  if (tail > 0) head.push({ label: withLabel("other", rest.reduce((s, t) => s + t.count, 0)), tokens: tail })
-  return head
+
+  const rest = items.slice(TOOL_ROWS)
+  const restTotal = rest.reduce((sum, item) => sum + item.value, 0)
+  if (restTotal > 0) top.push({ label: "other", value: formatCount(restTotal) })
+  return top
 }
 
-// Files node: a foldable "Files" with one child per loaded file (name -> tokens).
-// Falls back to a plain leaf when no per-file detail is present (old cache data).
-function filesNode(flObj, total) {
-  const kids = Object.entries(flObj || {})
-    .map(([label, tokens]) => ({ label: clip(label, LABEL_W), fullLabel: label, tokens: Number(tokens) || 0 }))
-    .filter((f) => f.tokens > 0)
-    .sort((a, b) => b.tokens - a.tokens)
-  return { label: "Files", tokens: total, children: kids }
-}
-
-function overheadNode(ov, scope, skillsTotal) {
-  const kids = []
-  if ((ov.opencode || 0) > 0) kids.push({ label: "opencode", tokens: ov.opencode })
-  if ((ov.agents || 0) > 0) kids.push({ label: "AGENTS.md", tokens: ov.agents })
-  if ((ov.toolDefs || 0) > 0) {
-    const node = { label: "tool defs", tokens: ov.toolDefs }
-    if (scope === "current" && ov.toolDefsByTool) node.children = toolChildren(ov.toolDefsByTool)
-    kids.push(node)
+function detailedFilesNode(filesObj, total) {
+  return {
+    label: "Files",
+    value: formatCount(total),
+    children: Object.entries(filesObj || {})
+      .map(([label, value]) => ({ label: shortLabel(label), value: formatCount(value), title: label }))
+      .filter((item) => item.value !== "-")
+      .sort((a, b) => (Number(String(b.value).replace(/,/g, "")) || 0) - (Number(String(a.value).replace(/,/g, "")) || 0)),
   }
-  if ((ov.skillDefs || 0) > 0) kids.push({ label: "skill defs", tokens: ov.skillDefs })
-  if ((skillsTotal || 0) > 0) kids.push({ label: "Skills", tokens: skillsTotal })
-  return { label: "Overhead", tokens: kids.reduce((s, k) => s + k.tokens, 0), children: kids }
 }
 
-function mergeTools(target, src) {
-  for (const [k, v] of Object.entries(src || {})) target[k] = (target[k] || 0) + (Number(v) || 0)
+function detailedOverheadNode(overhead, scope, skillsValue) {
+  const children = []
+  if ((overhead?.opencode || 0) > 0) children.push({ label: "opencode", value: formatCount(overhead.opencode) })
+  if ((overhead?.agents || 0) > 0) children.push({ label: "AGENTS.md", value: formatCount(overhead.agents) })
+  if ((overhead?.toolDefs || 0) > 0) {
+    const node = { label: "tool defs", value: formatCount(overhead.toolDefs) }
+    if (scope === "current" && overhead?.toolDefsByTool) node.children = detailedToolChildren(overhead.toolDefsByTool)
+    children.push(node)
+  }
+  if ((overhead?.skillDefs || 0) > 0) children.push({ label: "skill defs", value: formatCount(overhead.skillDefs) })
+  if ((skillsValue || 0) > 0) children.push({ label: "Skills", value: formatCount(skillsValue) })
+  return { label: "Overhead", value: formatCount(overheadTotal(overhead) + (Number(skillsValue) || 0)), children }
 }
 
-function groupTurns(entries) {
+function detailedGroupTurns(entries) {
   const turns = []
   let turn = null
   const start = () => ({ in: 0, out: 0, t: {}, tc: {}, tt: {}, f: 0, fl: {} })
-  for (const e of entries || []) {
-    if (e.r === "u") {
+  for (const entry of entries || []) {
+    if (entry?.r === "u") {
       if (turn) turns.push(turn)
       turn = start()
-      turn.in += e.in || 0
+      turn.in += Number(entry?.in) || 0
     } else {
       if (!turn) turn = start()
-      turn.out += e.out || 0
+      turn.out += Number(entry?.out) || 0
     }
-    mergeTools(turn.t, e.t)
-    mergeTools(turn.tc, e.tc)
-    for (const [tool, targets] of Object.entries(e.tt || {})) {
+    detailedMergeTools(turn.t, entry?.t)
+    detailedMergeTools(turn.tc, entry?.tc)
+    for (const [tool, targets] of Object.entries(entry?.tt || {})) {
       turn.tt[tool] ||= {}
-      mergeTools(turn.tt[tool], targets)
+      detailedMergeTools(turn.tt[tool], targets)
     }
-    mergeTools(turn.fl, e.fl)
-    turn.f += e.f || 0
+    detailedMergeTools(turn.fl, entry?.fl)
+    turn.f += Number(entry?.f) || 0
   }
   if (turn) turns.push(turn)
-  return turns.filter((t) => t.in + t.out + sumVals(t.t) + t.f > 0)
+  return turns.filter((turn) => turn.in + turn.out + sumValues(turn.t) + turn.f > 0)
 }
 
-function msgNode(t, n) {
-  const kids = []
-  if (t.in > 0) kids.push({ label: "Input", tokens: t.in })
-  if (t.out > 0) kids.push({ label: "Output", tokens: t.out })
-  const toolsTotal = sumVals(t.t)
-  if (toolsTotal > 0) kids.push({ label: "Tool calls", tokens: toolsTotal, children: toolChildren(t.t, t.tc, t.tt) })
-  if (t.f > 0) kids.push(filesNode(t.fl, t.f))
-  return { label: `Msg ${n}`, tokens: t.in + t.out + toolsTotal + t.f, children: kids }
+function detailedMsgNode(turn, index) {
+  const children = []
+  if (turn.in > 0) children.push({ label: "Input", value: formatCount(turn.in) })
+  if (turn.out > 0) children.push({ label: "Output", value: formatCount(turn.out) })
+  const toolsTotal = sumValues(turn.t)
+  if (toolsTotal > 0) children.push({ label: "Tool calls", value: formatCount(toolsTotal), children: detailedToolChildren(turn.t, turn.tc, turn.tt) })
+  if (turn.f > 0) children.push(detailedFilesNode(turn.fl, turn.f))
+  return { label: `Msg ${index}`, value: formatCount(turn.in + turn.out + toolsTotal + turn.f), children }
 }
 
-function buildList(entries, ov, scope, view) {
-  let skillsTotal = 0
+function buildModelList(entries, overhead, scope, view) {
+  let skillsValue = 0
   let filesTotal = 0
-  for (const e of entries || []) {
-    skillsTotal += e.s || 0
-    filesTotal += e.f || 0
+  for (const entry of entries || []) {
+    skillsValue += Number(entry?.s) || 0
+    filesTotal += Number(entry?.f) || 0
   }
-  const list = [overheadNode(ov, scope, skillsTotal)]
+
+  const list = [detailedOverheadNode(overhead, scope, skillsValue)]
 
   if (view === "prompt") {
-    const turns = groupTurns(entries)
-    const kids = turns.map((t, i) => msgNode(t, i + 1))
-    list.push({ label: "Prompts", tokens: kids.reduce((s, k) => s + k.tokens, 0), children: kids })
-  } else {
-    let input = 0, output = 0
-    const tools = {}, toolCounts = {}, toolTargets = {}, files = {}
-    for (const e of entries || []) {
-      input += e.in || 0
-      output += e.out || 0
-      mergeTools(tools, e.t)
-      mergeTools(toolCounts, e.tc)
-      for (const [tool, targets] of Object.entries(e.tt || {})) {
-        toolTargets[tool] ||= {}
-        mergeTools(toolTargets[tool], targets)
-      }
-      mergeTools(files, e.fl)
+    const turns = detailedGroupTurns(entries)
+    const children = turns.map((turn, index) => detailedMsgNode(turn, index + 1))
+    list.push({
+      label: "Prompts",
+      value: formatCount(children.reduce((sum, item) => sum + (Number(String(item.value).replace(/,/g, "")) || 0), 0)),
+      children,
+    })
+    return list.map((item) => addFractions(item))
+  }
+
+  let input = 0
+  let output = 0
+  const tools = {}
+  const toolCounts = {}
+  const toolTargets = {}
+  const files = {}
+  for (const entry of entries || []) {
+    input += Number(entry?.in) || 0
+    output += Number(entry?.out) || 0
+    detailedMergeTools(tools, entry?.t)
+    detailedMergeTools(toolCounts, entry?.tc)
+    for (const [tool, targets] of Object.entries(entry?.tt || {})) {
+      toolTargets[tool] ||= {}
+      detailedMergeTools(toolTargets[tool], targets)
     }
-    const pKids = []
-    if (input > 0) pKids.push({ label: "Input", tokens: input })
-    if (output > 0) pKids.push({ label: "Output", tokens: output })
-    if (filesTotal > 0) pKids.push(filesNode(files, filesTotal))
-    list.push({ label: "Prompts", tokens: input + output + filesTotal, children: pKids })
-    const toolsTotal = sumVals(tools)
-    if (toolsTotal > 0) list.push({ label: "Tools", tokens: toolsTotal, children: toolChildren(tools, toolCounts, toolTargets) })
+    detailedMergeTools(files, entry?.fl)
   }
 
-  setFrac(list)
-  return list.filter((n) => n.tokens > 0)
+  const promptChildren = []
+  if (input > 0) promptChildren.push({ label: "Input", value: formatCount(input) })
+  if (output > 0) promptChildren.push({ label: "Output", value: formatCount(output) })
+  if (filesTotal > 0) promptChildren.push(detailedFilesNode(files, filesTotal))
+  list.push({ label: "Prompts", value: formatCount(input + output + filesTotal), children: promptChildren })
+
+  const toolsTotal = sumValues(tools)
+  if (toolsTotal > 0) list.push({ label: "Tools", value: formatCount(toolsTotal), children: detailedToolChildren(tools, toolCounts, toolTargets) })
+  return list.map((item) => addFractions(item))
 }
 
-function setFrac(nodes) {
-  const max = nodes.reduce((m, n) => Math.max(m, n.tokens), 0)
-  for (const n of nodes) {
-    n.frac = max > 0 ? n.tokens / max : 0
-    if (n.children && n.children.length) setFrac(n.children)
-  }
+function shortLabel(value, width = 28) {
+  const text = String(value || "")
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}...`
 }
 
-// ---------------------------------------------------------------------------
-// UI primitives.
-// ---------------------------------------------------------------------------
-
-function palette(api) {
-  const t = api.theme.current
-  return { text: t.text, muted: t.textMuted, accent: t.primary, bar: t.primary, track: t.border }
+function shortTreeLabel(value, width = LABEL_W) {
+  const text = String(value || "")
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 3))}...`
 }
 
-function Line(props) {
+function Selector(props) {
   return (
-    <box flexDirection="row" justifyContent="space-between" gap={1}>
-      <text fg={props.colors.muted}>{props.label}</text>
-      <text fg={props.strong ? props.colors.text : props.colors.muted}>
-        {props.strong ? <b>{props.value}</b> : props.value}
-      </text>
+    <box flexDirection="row" gap={1}>
+      <text fg={props.colors.textMuted}>{`${props.label}:`}</text>
+      <text fg={props.colors.textMuted} onMouseUp={props.onToggle}>{"<"}</text>
+      <text fg={props.colors.text}><b>{props.value}</b></text>
+      <text fg={props.colors.textMuted} onMouseUp={props.onToggle}>{">"}</text>
     </box>
   )
 }
 
 function Bar(props) {
   const width = props.width || 8
-  const filled = Math.max(0, Math.min(width, Math.round((props.frac || 0) * width)))
+  const filled = Math.max(0, Math.min(width, Math.round((Number(props.frac) || 0) * width)))
   return (
     <text wrapMode="none">
-      <span style={{ fg: props.dim ? props.colors.track : props.colors.bar }}>{"█".repeat(filled)}</span>
-      <span style={{ fg: props.colors.track }}>{"░".repeat(width - filled)}</span>
+      <span style={{ fg: props.dim ? props.colors.border : props.colors.primary }}>{"█".repeat(filled)}</span>
+      <span style={{ fg: props.colors.border }}>{"░".repeat(width - filled)}</span>
     </text>
   )
 }
 
-function Selector(props) {
-  return (
-    <box flexDirection="row" gap={1} alignItems="center">
-      <box width={8}>
-        <text fg={props.colors.muted}>{`${props.label}:`}</text>
-      </box>
-      <text fg={props.colors.muted} onMouseDown={props.onToggle}>{"<"}</text>
-      <text fg={props.colors.accent}><b>{props.value}</b></text>
-      <text fg={props.colors.muted} onMouseDown={props.onToggle}>{">"}</text>
-    </box>
-  )
-}
-
 function TreeRow(props) {
-  const node = props.node
-  const foldable = !!(node.children && node.children.length > 0)
-  const isOpen = () => !!props.expanded()[props.path]
-  const labelStr = () => " ".repeat(props.depth) + (foldable ? (isOpen() ? "▼ " : "▶ ") : "") + node.label
-  const value = () => typeof node.count === "number" ? `${node.count}x` : fmtK(node.tokens)
+  const foldable = () => Array.isArray(props.node?.children) && props.node.children.length > 0
+  const prefix = () => `${" ".repeat(props.depth || 0)}${foldable() ? (props.isOpen(props.path) ? "▼ " : "▶ ") : "  "}`
   const click = () => {
-    if (node.fullLabel) props.toggleDetail(node.fullLabel)
-    else if (foldable) props.toggle(props.path)
+    if (foldable()) props.onToggle(props.path)
+    else if (props.node?.title) props.onSelect(props.node.title)
   }
+
   return (
-    <box flexDirection="column" gap={0}>
-      <box flexDirection="row" gap={1} alignItems="center" title={node.fullLabel || node.label} onMouseDown={click}>
+    <box flexDirection="column">
+      <box flexDirection="row" gap={1} alignItems="center">
         <box width={LABEL_W}>
-          <text fg={props.depth > 0 ? props.colors.muted : props.colors.text}>{clip(labelStr(), LABEL_W)}</text>
+          <text fg={props.depth > 0 ? props.colors.textMuted : props.colors.text} title={props.node?.title} onMouseUp={click}>{shortTreeLabel(`${prefix()}${props.node.label}`)}</text>
         </box>
         <box flexGrow={1}>
-          <Bar colors={props.colors} frac={node.frac} dim={props.depth > 0} />
+          <Bar colors={props.colors} frac={props.node?.frac} dim={props.depth > 0} />
         </box>
-        <box width={7} justifyContent="flex-end">
-          <text fg={props.colors.muted}>{value()}</text>
+        <box width={8} justifyContent="flex-end">
+          <text fg={props.colors.textMuted}>{props.node.value}</text>
         </box>
       </box>
-      <Show when={foldable && isOpen()}>
-        <For each={node.children}>
-          {(child) => (
-            <TreeRow node={child} depth={props.depth + 1} path={`${props.path}/${child.label}`} colors={props.colors} expanded={props.expanded} toggle={props.toggle} toggleDetail={props.toggleDetail} />
+      <Show when={foldable() && props.isOpen(props.path)}>
+        <For each={props.node.children}>
+          {(child, index) => (
+            <TreeRow
+              node={child}
+              path={`${props.path}/${index()}`}
+              depth={(props.depth || 0) + 1}
+              colors={props.colors}
+              isOpen={props.isOpen}
+              onToggle={props.onToggle}
+              onSelect={props.onSelect}
+            />
           )}
         </For>
       </Show>
@@ -419,150 +242,285 @@ function TreeRow(props) {
   )
 }
 
-// ---------------------------------------------------------------------------
-// View.
-// ---------------------------------------------------------------------------
+function formatCount(value) {
+  const num = Math.round(Number(value) || 0)
+  return num > 0 ? num.toLocaleString("en-US") : "-"
+}
+
+function fallbackEntry(message, parts) {
+  const role = message?.role === "user" ? "u" : "a"
+  const entry = { r: role, in: 0, out: 0, t: {}, tc: {}, tt: {}, f: 0, fl: {}, s: 0, o: message?.time?.created || 0 }
+  for (const part of parts || []) {
+    if (part?.type === "text" && !part.synthetic && typeof part.text === "string") {
+      const tokens = Math.ceil(part.text.length / 4)
+      if (role === "u") entry.in += tokens
+      else entry.out += tokens
+      continue
+    }
+    if (part?.type === "tool") {
+      const name = part.tool || "tool"
+      const output = typeof part.state?.output === "string" ? part.state.output : ""
+      const args = part.state?.input ? JSON.stringify(part.state.input) : ""
+      const tokens = Math.ceil(output.length / 4) + Math.ceil(args.length / 4)
+      if (name === "skill") {
+        entry.s += tokens
+      } else {
+        entry.t[name] = (entry.t[name] || 0) + tokens
+        entry.tc[name] = (entry.tc[name] || 0) + 1
+        const targets = entry.tt[name] || {}
+        const direct = part.state?.input?.filePath || part.state?.input?.url || part.state?.input?.path || part.state?.input?.include
+        if (typeof direct === "string" && direct) targets[direct] = (targets[direct] || 0) + tokens
+        entry.tt[name] = targets
+      }
+      continue
+    }
+    if (part?.type === "file") {
+      const text = part.source?.text?.value
+      if (typeof text === "string") {
+        const tokens = Math.ceil(text.length / 4)
+        const name = part.filename || part.source?.path || part.url || "file"
+        entry.f += tokens
+        entry.fl[name] = (entry.fl[name] || 0) + tokens
+      }
+    }
+  }
+  return entry
+}
+
+function buildFallback(api, sessionID) {
+  if (!sessionID) return { current: [], total: [], overheadCurrent: {}, overheadTotal: {} }
+  const messages = api.state?.session?.messages?.(sessionID) || []
+  const entries = messages.map((message) => fallbackEntry(message, api.state?.part?.(message.id) || []))
+  return {
+    current: entries.length > 0 ? [entries[entries.length - 1]] : [],
+    total: entries,
+    overheadCurrent: {},
+    overheadTotal: {},
+  }
+}
+
+function mergeLiveEntries(captured, live) {
+  const merged = Array.isArray(captured) ? [...captured] : []
+  for (const liveEntry of live || []) {
+    const index = merged.findIndex((entry) => entry?.o === liveEntry?.o && entry?.r === liveEntry?.r)
+    if (index >= 0) {
+      if (entryTotal(liveEntry) >= entryTotal(merged[index])) merged[index] = liveEntry
+      continue
+    }
+    merged.push(liveEntry)
+  }
+  return merged.sort((a, b) => (a?.o || 0) - (b?.o || 0))
+}
+
+function addFractions(node) {
+  const children = Array.isArray(node?.children) ? node.children : []
+  const max = children.reduce((current, child) => Math.max(current, Number(String(child?.value || "0").replace(/,/g, "")) || 0), Number(String(node?.value || "0").replace(/,/g, "")) || 0)
+  const withChildren = children.map((child) => addFractions(child))
+  return {
+    ...node,
+    frac: max > 0 ? ((Number(String(node?.value || "0").replace(/,/g, "")) || 0) / max) : 0,
+    children: withChildren.map((child) => ({
+      ...child,
+      frac: max > 0 ? ((Number(String(child?.value || "0").replace(/,/g, "")) || 0) / max) : 0,
+    })),
+  }
+}
+
+async function readCapture(api, sessionID) {
+  try {
+    if (typeof Bun === "undefined" || !sessionID) return null
+    const configDir = api.state?.path?.config
+    if (!configDir) return null
+    const file = Bun.file(`${String(configDir).replace(/[\\/]+$/, "")}/.token-usage-cache.json`)
+    if (!(await file.exists())) return null
+    const data = await file.json()
+    return data?.sessions?.[sessionID] || null
+  } catch {
+    return null
+  }
+}
+
+function currentSessionID(api, sessionID?: string) {
+  if (sessionID) return sessionID
+  const route = api.route?.current
+  return route?.name === "session" && typeof route.params?.sessionID === "string" ? route.params.sessionID : undefined
+}
+
+function getStats(api, sessionID?: string) {
+  try {
+    const id = currentSessionID(api, sessionID)
+    if (!id) return { context: "-", cache: "-" }
+    const messages = api.state?.session?.messages?.(id) || []
+    let last
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const item = messages[i]
+      if (item?.role !== "assistant") continue
+      if ((item?.tokens?.total || item?.tokens?.output || 0) <= 0) continue
+      last = item
+      break
+    }
+    if (!last?.tokens) return { context: "-", cache: "-" }
+    const total = Number(last.tokens.total) || (Number(last.tokens.input) || 0) + (Number(last.tokens.output) || 0) + (Number(last.tokens.reasoning) || 0) + (Number(last.tokens.cache?.read) || 0) + (Number(last.tokens.cache?.write) || 0)
+    const cacheRead = Number(last.tokens.cache?.read) || 0
+    return {
+      context: total > 0 ? formatCount(total) : "-",
+      cache: total > 0 ? `${Math.round((cacheRead / total) * 100)}%` : "-",
+    }
+  } catch {
+    return { context: "-", cache: "-" }
+  }
+}
 
 function View(props) {
   const api = props.api
+  const [open, setOpen] = createSignal(false)
   const [capture, setCapture] = createSignal(null)
+  const [scope, setScope] = createSignal("current")
+  const [view, setView] = createSignal("prompt")
   const [expanded, setExpanded] = createSignal({})
   const [detail, setDetail] = createSignal("")
-  const [scope, setScope] = createSignal(api.kv?.get?.("tm_scope", "total") || "total")
-  const [view, setView] = createSignal(api.kv?.get?.("tm_view", "prompt") || "prompt")
 
-  const open = panelOpen
-  const setOpen = setPanelOpen
-  const sessionID = () => {
-    const route = api.route?.current
-    return props.session_id || (route?.name === "session" && typeof route.params?.sessionID === "string" ? route.params.sessionID : undefined)
-  }
-  const toggle = (path) => setExpanded((e) => ({ ...e, [path]: !e[path] }))
-  const toggleDetail = (label) => setDetail((cur) => cur === label ? "" : label)
-  const toggleOpen = () => {
-    const next = !open()
-    try { api.kv?.set?.("tm_open", next) } catch {}
+  const applyOpen = (next) => {
+    try { api.kv?.set?.(OPEN_KV_KEY, next) } catch {}
     setOpen(next)
   }
-  const toggleScope = () => { const v = scope() === "total" ? "current" : "total"; try { api.kv?.set?.("tm_scope", v) } catch {} ; setScope(v) }
-  const toggleView = () => { const v = view() === "prompt" ? "tool" : "prompt"; try { api.kv?.set?.("tm_view", v) } catch {} ; setView(v) }
 
-  let disposed = false
-  let unsubscribe, timer, debounce
+  const toggleOpen = () => {
+    applyOpen(!open())
+  }
 
-  const refreshCapture = () => readCapture(api, sessionID()).then((d) => !disposed && setCapture(d)).catch(() => {})
+  const toggleScope = () => {
+    const next = scope() === "total" ? "current" : "total"
+    try { api.kv?.set?.(SCOPE_KV_KEY, next) } catch {}
+    setScope(next)
+  }
+
+  const toggleView = () => {
+    const next = view() === "tool" ? "prompt" : "tool"
+    try { api.kv?.set?.(VIEW_KV_KEY, next) } catch {}
+    setView(next)
+  }
+
+  const isOpen = (path) => expanded()[path] === true
+  const toggleTree = (path) => {
+    setExpanded((state) => ({ ...state, [path]: !isOpen(path) }))
+  }
+
+  const toggleDetail = (value) => {
+    setDetail((current) => current === value ? "" : value)
+  }
 
   onMount(() => {
-    refreshCapture()
-    unsubscribe = api.event.on("message.updated", () => {
-      setCapture((v) => v ? { ...v } : v)
+    try { setOpen(api.kv?.get?.(OPEN_KV_KEY, false) === true) } catch {}
+    try { setScope(api.kv?.get?.(SCOPE_KV_KEY, "current") === "total" ? "total" : "current") } catch {}
+    try { setView(api.kv?.get?.(VIEW_KV_KEY, "prompt") === "tool" ? "tool" : "prompt") } catch {}
+    toggleOpenFromCommand = () => applyOpen(!open())
+
+    let disposed = false
+    let timer
+    let debounce
+    const refreshCapture = () => readCapture(api, currentSessionID(api, props.session_id)).then((data) => {
+      if (!disposed) setCapture(data)
+    }).catch(() => {})
+
+    void refreshCapture()
+    const unsubscribe = api.event?.on?.("message.updated", () => {
       if (debounce) clearTimeout(debounce)
-      debounce = setTimeout(refreshCapture, EVENT_DEBOUNCE_MS)
+      debounce = setTimeout(() => {
+        void refreshCapture()
+      }, EVENT_DEBOUNCE_MS)
     })
-    timer = setInterval(refreshCapture, REFRESH_MS)
+    timer = setInterval(() => {
+      void refreshCapture()
+    }, REFRESH_MS)
+
+    onCleanup(() => {
+      disposed = true
+      if (timer) clearInterval(timer)
+      if (debounce) clearTimeout(debounce)
+      if (unsubscribe) unsubscribe()
+    })
   })
+
   onCleanup(() => {
-    disposed = true
-    if (unsubscribe) unsubscribe()
-    if (timer) clearInterval(timer)
-    if (debounce) clearTimeout(debounce)
+    if (toggleOpenFromCommand) toggleOpenFromCommand = undefined
   })
 
-  const model = createMemo(() => {
-    const live = buildFallback(api, sessionID())
-    const raw = capture()
-    const cap = raw?.session || live
-    const sc = scope()
-    if (sc === "total") {
-      const all = raw?.all || { total: cap.total || [], overheadTotal: cap.overheadTotal || {} }
-      const entries = mergeLiveEntries(all.total || [], live.total || [])
-      return { ready: true, list: buildList(entries, all.overheadTotal || {}, "total", view()) }
+  const colors = () => api.theme.current
+  const stats = createMemo(() => getStats(api, props.session_id))
+  const summary = createMemo(() => {
+    const live = buildFallback(api, currentSessionID(api, props.session_id))
+    const data = capture() || live
+    const scopeValue = scope()
+    const viewValue = view()
+    if (!data) {
+      return {
+        scope: scopeValue,
+        view: viewValue,
+        requests: "-",
+        current: "-",
+        input: "-",
+        output: "-",
+        tools: "-",
+        files: "-",
+        skills: "-",
+        entries: [],
+        overheadRaw: {},
+      }
     }
-    if (!cap || !Array.isArray(cap.total)) return { ready: false, list: [] }
-    const entries = mergeLiveEntries((cap.current?.length ? cap.current : cap.total) || [], live.current || [])
-    return { ready: true, list: buildList(entries, cap.overheadCurrent || {}, "current", view()) }
-  })
 
-  const head = createMemo(() => {
-    const id = sessionID()
-    let last
-    if (id) {
-      const messages = api.state.session.messages(id) || []
-      for (const m of messages) if (m.role === "assistant" && (m.tokens?.total || m.tokens?.output || 0) > 0) last = m
+    const entries = scopeValue === "total"
+      ? mergeLiveEntries(data.total || [], live.total || [])
+      : mergeLiveEntries(data.current || [], live.current || [])
+    const breakdown = entryBreakdown(entries)
+    const selectedTotal = entries.reduce((sum, entry) => sum + entryTotal(entry), 0)
+    return {
+      scope: scopeValue,
+      view: viewValue,
+      requests: formatCount(scopeValue === "total" ? data.reqCount : 1),
+      current: formatCount(selectedTotal),
+      input: formatCount(breakdown.input),
+      output: formatCount(breakdown.output),
+      tools: formatCount(breakdown.tools),
+      files: formatCount(breakdown.files),
+      skills: formatCount(breakdown.skills),
+      entries,
+      overheadRaw: scopeValue === "total" ? (data.overheadTotal || {}) : (data.overheadCurrent || {}),
     }
-    if (last?.tokens) {
-      const total = last.tokens.total || (last.tokens.input || 0) + (last.tokens.output || 0) + (last.tokens.cache?.read || 0) + (last.tokens.cache?.write || 0)
-      const cacheRead = last.tokens.cache?.read
-      const cachedPct = typeof cacheRead === "number" && total > 0 ? Math.round((cacheRead / total) * 100) : undefined
-      return { has: total > 0, contextNow: total, cachedPct, limitPct: 0 }
-    }
-    const cap = capture()?.session
-    const current = Array.isArray(cap?.current) ? cap.current : []
-    const ov = cap?.overheadCurrent || {}
-    const overhead = (ov.opencode || 0) + (ov.agents || 0) + (ov.skillDefs || 0) + (ov.toolDefs || 0)
-    const total = overhead + current.reduce((sum, entry) => sum + entryTotal(entry), 0)
-    return { has: total > 0, contextNow: total, cachedPct: undefined, limitPct: 0 }
   })
+  const currentPromptLabel = createMemo(() => summary().scope === "total"
+    ? `Session total: ${summary().current}`
+    : `This prompt: ${stats().context} (${stats().cache} cache hit)`)
 
-  const colors = () => palette(api)
-  const scopeLabel = () => (scope() === "total" ? "Total" : "Aktuel")
-  const viewLabel = () => (view() === "prompt" ? "Prompts" : "Tools")
+  const model = createMemo(() => buildModelList(summary().entries, summary().overheadRaw, summary().scope === "total" ? "total" : "current", summary().view === "tool" ? "tool" : "prompt"))
 
   return (
-    <Show when={enabled()}>
-      <box flexDirection="column" gap={0}>
-        <box
-          flexDirection="row"
-          gap={1}
-          alignItems="center"
-          onMouseUp={toggleOpen}
-        >
-          <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
-          <text fg={colors().text}><b>Token Monsters:</b></text>
-          <Show when={!open() && head().has}>
-            <box flexGrow={1} justifyContent="flex-end">
-              <text fg={colors().muted}>{fmtK(head().contextNow)}</text>
-            </box>
-          </Show>
-        </box>
-
-        <Show when={open()}>
-          <box flexDirection="column" gap={0}>
-            <box flexDirection="column" gap={0}>
-              <Selector colors={colors()} label="Session" value={scopeLabel()} onToggle={toggleScope} />
-              <Selector colors={colors()} label="View" value={viewLabel()} onToggle={toggleView} />
-            </box>
-
-            <box flexDirection="column" gap={0} paddingTop={1}>
-              <Line colors={colors()} label="Context now" value={head().limitPct > 0 ? `${fmt(head().contextNow)} · ${head().limitPct}%` : fmt(head().contextNow)} strong />
-              <Line colors={colors()} label="Cache hit" value={head().cachedPct === undefined ? "-" : `${head().cachedPct}%`} strong />
-              <Show when={detail()}>
-                <box flexDirection="column" gap={0} paddingTop={1}>
-                  <text fg={colors().muted}>Selected path</text>
-                  <text fg={colors().muted} onMouseDown={() => setDetail("")}>{detail()}</text>
-                </box>
-              </Show>
-            </box>
-
-            <box flexDirection="column" gap={0} paddingTop={1}>
-              <text fg={colors().muted}>{scope() === "total" ? "Total session ~approx" : "This prompt ~approx"}</text>
-              <Show when={model().ready} fallback={<text fg={colors().muted}>No session data</text>}>
-                <For each={model().list}>
-                  {(item) => <TreeRow node={item} depth={0} path={item.label} colors={colors()} expanded={expanded} toggle={toggle} toggleDetail={toggleDetail} />}
-                </For>
-              </Show>
-            </box>
-          </box>
-        </Show>
+    <box flexDirection="column">
+      <box flexDirection="row" gap={1} onMouseUp={toggleOpen}>
+        <text fg={colors().text}><b>{open() ? "▼" : "▶"}</b></text>
+        <text fg={colors().text}><b>Token Monsters</b></text>
       </box>
-    </Show>
+      <Show when={open()}>
+        <box flexDirection="column">
+          <Selector colors={colors()} label="Session" value={summary().scope === "total" ? "Total" : "Aktuel"} onToggle={toggleScope} />
+          <Selector colors={colors()} label="View" value={summary().view === "tool" ? "Tools" : "Prompts"} onToggle={toggleView} />
+          <text fg={colors().textMuted}>{currentPromptLabel()}</text>
+          <Show when={detail()}>
+            <text fg={colors().textMuted}>{`Selected path: ${detail()}`}</text>
+          </Show>
+          <text fg={colors().textMuted}> </text>
+          <box flexDirection="column">
+            <For each={model()}>
+              {(item, index) => <TreeRow node={item} path={`${item.label}-${index()}`} depth={0} colors={colors()} isOpen={isOpen} onToggle={toggleTree} onSelect={toggleDetail} />}
+            </For>
+          </box>
+          <text fg={colors().textMuted}>{`Requests: ${summary().requests}`}</text>
+        </box>
+      </Show>
+    </box>
   )
 }
 
-// Register the /tokenmonster slash command + command-palette entry that folds
-// the sidebar panel. The running opencode (1.17+) exposes api.keymap.registerLayer
-// (slashName/run); older typed builds expose api.command.register (slash/onSelect).
-// Support both so the toggle works regardless of host version.
 function registerCommand(api, toggle) {
   const def = {
     name: "tokenmonster.toggle",
@@ -591,20 +549,19 @@ export const TokenMonsters = {
   id: PLUGIN_ID,
   async tui(api, options) {
     if (options?.enabled === false) return
-    try { setEnabled(api.kv?.get?.("tm_enabled", true) !== false) } catch {}
-    try { setPanelOpen(api.kv?.get?.("tm_open", false) === true) } catch {}
     const toggle = () => {
-      const v = !panelOpen()
-      try { api.kv?.set?.("tm_open", v) } catch {}
-      setPanelOpen(v)
-      try { api.ui?.toast?.({ variant: v ? "success" : "info", message: `Token Monsters ${v ? "expanded" : "collapsed"}` }) } catch {}
+      toggleOpenFromCommand?.()
+      const next = api.kv?.get?.(OPEN_KV_KEY, false) === true
+      try { api.ui?.toast?.({ variant: next ? "success" : "info", message: `Token Monsters ${next ? "expanded" : "collapsed"}` }) } catch {}
     }
     registerCommand(api, toggle)
     const order = typeof options?.order === "number" ? options.order : DEFAULT_ORDER
     api.slots.register({
       order,
       slots: {
-        sidebar_content: (_ctx, slotProps) => <View api={api} session_id={slotProps.session_id} options={options} />,
+        sidebar_content(props: { session_id?: string }) {
+          return <View api={api} session_id={props.session_id} options={options} />
+        },
       },
     })
   },
