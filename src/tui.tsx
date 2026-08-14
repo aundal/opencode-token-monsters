@@ -439,8 +439,7 @@ function View(props) {
   }
   const toggle = (path) => setExpanded((e) => ({ ...e, [path]: !e[path] }))
   const toggleDetail = (label) => setDetail((cur) => cur === label ? "" : label)
-  const toggleOpen = (evt) => {
-    evt?.stopPropagation?.()
+  const toggleOpen = () => {
     const next = !open()
     try { api.kv?.set?.("tm_open", next) } catch {}
     setOpen(next)
@@ -516,7 +515,7 @@ function View(props) {
           flexDirection="row"
           gap={1}
           alignItems="center"
-          onMouseDown={toggleOpen}
+          onMouseUp={toggleOpen}
         >
           <text fg={colors().text}>{open() ? "▼" : "▶"}</text>
           <text fg={colors().text}><b>Token Monsters:</b></text>
